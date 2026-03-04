@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentira Prototype - Moving AI</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #1a1a1a;
+            color: white;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        
+        #game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        
+        canvas {
+            border: 2px solid #444;
+            background: #000;
+        }
+        
+        .info {
+            text-align: center;
+            max-width: 600px;
+        }
+        
+        .info h1 {
+            margin-bottom: 10px;
+            color: #4CAF50;
+        }
+        
+        .controls {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+        
+        .loading {
+            font-size: 18px;
+            color: #4CAF50;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div class="info">
+            <h1>🤖 Agentira Prototype</h1>
+            <p>3D environment with autonomous AI agents moving around</p>
+            <div class="controls">
+                <strong>Features:</strong><br>
+                • Multiple AI agents with different colors<br>
+                • Random movement patterns<br>
+                • Boundary collision detection<br>
+                • Auto-rotating camera view<br>
+                • Real-time 3D rendering
+            </div>
+        </div>
+        
+        <div id="loading" class="loading">Loading WASM...</div>
+        <canvas id="glcanvas" width="800" height="600" style="display: none;"></canvas>
+    </div>
+
+    <script>
+        // WASM loading and WebGL setup
+        let wasmModule;
+        
+        async function loadWasm() {
+            try {
+                const wasmResponse = await fetch('./agentira_prototype.wasm');
+                const wasmBytes = await wasmResponse.arrayBuffer();
+                wasmModule = await WebAssembly.instantiate(wasmBytes);
+                
+                document.getElementById('loading').textContent = 'WASM loaded! Starting game...';
+                setTimeout(startGame, 1000);
+            } catch (error) {
+                console.error('Failed to load WASM:', error);
+                document.getElementById('loading').innerHTML = 
+                    '❌ Failed to load WASM<br><small>Check browser console for details</small>';
+            }
+        }
+        
+        function startGame() {
+            const canvas = document.getElementById('glcanvas');
+            const loading = document.getElementById('loading');
+            
+            canvas.style.display = 'block';
+            loading.style.display = 'none';
+            
+            // Initialize WebGL context for Macroquad
+            const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+            if (!gl) {
+                loading.innerHTML = '❌ WebGL not supported in this browser';
+                loading.style.display = 'block';
+                canvas.style.display = 'none';
+                return;
+            }
+            
+            // Basic WebGL setup - Macroquad will take over from here
+            gl.clearColor(0.5, 0.8, 1.0, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            
+            // Note: In a real implementation, we would call the WASM module's main function here
+            // For this prototype, we show a placeholder
+            showPlaceholder(gl);
+        }
+        
+        function showPlaceholder(gl) {
+            const canvas = gl.canvas;
+            const ctx = canvas.getContext('2d');
+            
+            if (ctx) {
+                // Fallback 2D canvas rendering for demo
+                ctx.fillStyle = '#87CEEB';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                // Draw some animated cubes as placeholder
+                let frame = 0;
+                function animate() {
+                    ctx.fillStyle = '#87CEEB';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    // Draw grid
+                    ctx.strokeStyle = '#666';
+                    ctx.lineWidth = 1;
+                    for (let i = 0; i < canvas.width; i += 40) {
+                        ctx.beginPath();
+                        ctx.moveTo(i, 0);
+                        ctx.lineTo(i, canvas.height);
+                        ctx.stroke();
+                    }
+                    for (let i = 0; i < canvas.height; i += 40) {
+                        ctx.beginPath();
+                        ctx.moveTo(0, i);
+                        ctx.lineTo(canvas.width, i);
+                        ctx.stroke();
+                    }
+                    
+                    // Draw animated cubes representing AI agents
+                    const colors = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF'];
+                    for (let i = 0; i < 5; i++) {
+                        const x = 200 + Math.sin(frame * 0.01 + i) * 150;
+                        const y = 200 + Math.cos(frame * 0.015 + i * 1.2) * 100;
+                        
+                        ctx.fillStyle = colors[i];
+                        ctx.fillRect(x - 15, y - 15, 30, 30);
+                        
+                        // Direction indicator
+                        ctx.fillStyle = '#FFFFFF';
+                        const dx = Math.sin(frame * 0.01 + i) * 20;
+                        const dy = Math.cos(frame * 0.015 + i * 1.2) * 20;
+                        ctx.fillRect(x + dx - 3, y + dy - 3, 6, 6);
+                    }
+                    
+                    ctx.fillStyle = '#333';
+                    ctx.font = '16px Arial';
+                    ctx.fillText('Demo: AI Agents Moving (WASM placeholder)', 20, 30);
+                    ctx.fillText(`Frame: ${frame}`, 20, 50);
+                    
+                    frame++;
+                    requestAnimationFrame(animate);
+                }
+                animate();
+            }
+        }
+        
+        // Start loading when page loads
+        window.addEventListener('load', loadWasm);
+    </script>
+</body>
+</html>
