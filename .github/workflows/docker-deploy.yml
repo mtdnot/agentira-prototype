@@ -1,0 +1,49 @@
+name: Docker Build and Deploy WASM
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  docker-build-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build with Docker
+      run: |
+        # Build the Docker image and extract built assets
+        docker build -t agentira-build .
+        
+        # Create container and copy built files
+        docker create --name temp-container agentira-build
+        docker cp temp-container:/project/dist ./dist
+        docker rm temp-container
+        
+        # Verify build output
+        ls -la dist/
+        
+    - name: Setup Pages
+      uses: actions/configure-pages@v4
+      
+    - name: Upload artifact
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: './dist'
+        
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4
