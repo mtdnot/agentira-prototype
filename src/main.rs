@@ -76,6 +76,27 @@ enum AgentTask {
     Collecting(usize),    // リソースID
     Transporting,
     Operating(usize),     // 建物稼働
+    CustomCommand(CommandType), // プロンプト指示
+}
+
+// プロンプトコマンドタイプ
+#[derive(Clone, Copy, PartialEq)]
+enum CommandType {
+    MoveTo(Vec3),         // 指定位置に移動
+    Follow(usize),        // 特定エージェントを追従
+    Guard(Vec3),          // エリア警備
+    SpeedBoost,           // 速度上昇
+    TeamUp(usize),        // チーム編成
+    Stop,                 // 停止
+}
+
+// プロンプト解析結果
+#[derive(Clone)]
+struct ParsedCommand {
+    command_type: CommandType,
+    target_agents: Vec<usize>, // 対象エージェントのインデックス
+    duration: f32,             // 実行時間
+    description: String,       // 説明文
 }
 
 // AI Agent structure
@@ -400,6 +421,12 @@ async fn main() {
     let mut construction_mode = false;
     let mut resource_spawn_timer = 0.0;
     
+    // プロンプトシステム初期化
+    let mut prompt_input = String::new();
+    let mut prompt_active = false;
+    let mut command_history: Vec<String> = Vec::new();
+    let mut active_commands: Vec<ParsedCommand> = Vec::new();
+    
     // 初期リソースを配置
     spawn_initial_resources(&mut resources);
 
@@ -430,6 +457,26 @@ async fn main() {
             }
         }
         
+        // プロンプト指示システム (C + 数字キー)
+        if is_key_down(KeyCode::C) {
+            if is_key_pressed(KeyCode::Key6) {
+                execute_prompt_command(&mut agents, "青いエージェントを中央に集める", 0);
+                command_history.push("青いエージェントを中央に集合".to_string());
+            } else if is_key_pressed(KeyCode::Key7) {
+                execute_prompt_command(&mut agents, "全エージェントでリソース大量収集", 1);
+                command_history.push("全員でリソース収集開始".to_string());
+            } else if is_key_pressed(KeyCode::Key8) {
+                execute_prompt_command(&mut agents, "スカウトを高速探索モードに", 2);
+                command_history.push("スカウト高速探索モード".to_string());
+            } else if is_key_pressed(KeyCode::Key9) {
+                execute_prompt_command(&mut agents, "全エージェント停止・待機", 3);
+                command_history.push("全員停止・待機".to_string());
+            } else if is_key_pressed(KeyCode::Key0) {
+                execute_prompt_command(&mut agents, "チーム編成：建設・収集・警備", 4);
+                command_history.push("チーム編成実行".to_string());
+            }
+        }
+        
         // 自動モード切り替え (15秒ごと)
         if flock_mode_timer > 15.0 {
             flock_mode_timer = 0.0;
@@ -457,6 +504,14 @@ async fn main() {
             resource_spawn_timer = 0.0;
             spawn_random_resource(&mut resources);
         }
+        
+        // コマンド履歴管理（最新10件のみ保持）
+        if command_history.len() > 10 {
+            command_history.remove(0);
+        }
+        
+        // プロンプトコマンド更新
+        update_prompt_commands(&mut agents, &mut active_commands, delta_time);
         
         // 建設システム更新
         if construction_mode {
@@ -518,27 +573,33 @@ async fn main() {
         set_default_camera();
 
         // Draw UI
-        draw_text("Agentira Prototype - Factory Automation 🏭", 20.0, 30.0, 20.0, DARKGRAY);
+        draw_text("Agentira Prototype - AI Command Center 🧠", 20.0, 30.0, 20.0, DARKGRAY);
         draw_text(&format!("FPS: {:.0}", get_fps()), 20.0, 50.0, 16.0, DARKGRAY);
         
         // 群れ行動制御UI
-        draw_text("🎮 Flock Controls:", 20.0, 80.0, 16.0, BLUE);
-        draw_text("[1] Wandering  [2] Follow  [3] V-Form  [4] Circle  [5] Gather", 20.0, 100.0, 12.0, DARKGRAY);
+        draw_text("🎮 Flock Controls:", 20.0, 80.0, 14.0, BLUE);
+        draw_text("[1] Wandering  [2] Follow  [3] V-Form  [4] Circle  [5] Gather", 20.0, 95.0, 11.0, DARKGRAY);
+        
+        // プロンプト指示システムUI
+        draw_text("💬 AI Commands (Hold [C] + Number):", 20.0, 120.0, 14.0, PURPLE);
+        draw_text("[C+6] Gather Blue Agents  [C+7] Mass Resource Collection", 20.0, 135.0, 10.0, DARKGRAY);
+        draw_text("[C+8] Scout High-Speed    [C+9] All Stop & Wait", 20.0, 150.0, 10.0, DARKGRAY);
+        draw_text("[C+0] Team Formation      [B] Building Mode", 20.0, 165.0, 10.0, DARKGRAY);
         
         // 建設システムUI
         let construction_status = if construction_mode { "🏗️ BUILDING" } else { "🚶 ROAMING" };
         let construction_color = if construction_mode { ORANGE } else { GREEN };
         
-        draw_text("🏭 Factory System:", 20.0, 130.0, 16.0, ORANGE);
-        draw_text("[B] Toggle Building Mode", 20.0, 150.0, 12.0, DARKGRAY);
-        draw_text(&format!("Status: {}", construction_status), 20.0, 170.0, 14.0, construction_color);
+        draw_text("🏭 Factory System:", 20.0, 185.0, 14.0, ORANGE);
+        draw_text(&format!("Status: {}", construction_status), 20.0, 200.0, 12.0, construction_color);
         
         // 統計表示
-        draw_text(&format!("Buildings: {}  Resources: {}", buildings.len(), resources.len()), 20.0, 190.0, 12.0, GRAY);
+        draw_text(&format!("Buildings: {}  Resources: {}  Active Commands: {}", 
+            buildings.len(), resources.len(), active_commands.len()), 20.0, 220.0, 11.0, GRAY);
         
         // エージェント状態
-        if construction_mode {
-            let mut task_counts = [0; 6]; // Idle, Exploring, Building, Collecting, Transporting, Operating
+        if construction_mode || !active_commands.is_empty() {
+            let mut task_counts = [0; 7]; // Idle, Exploring, Building, Collecting, Transporting, Operating, CustomCommand
             for agent in &agents {
                 match agent.current_task {
                     AgentTask::Idle => task_counts[0] += 1,
@@ -547,10 +608,11 @@ async fn main() {
                     AgentTask::Collecting(_) => task_counts[3] += 1,
                     AgentTask::Transporting => task_counts[4] += 1,
                     AgentTask::Operating(_) => task_counts[5] += 1,
+                    AgentTask::CustomCommand(_) => task_counts[6] += 1,
                 }
             }
-            draw_text(&format!("Tasks: Idle:{} Build:{} Collect:{} Transport:{}", 
-                task_counts[0], task_counts[2], task_counts[3], task_counts[4]), 20.0, 210.0, 11.0, BLUE);
+            draw_text(&format!("Tasks: Idle:{} Build:{} Collect:{} Commands:{}", 
+                task_counts[0], task_counts[2], task_counts[3], task_counts[6]), 20.0, 235.0, 10.0, BLUE);
         } else {
             let current_mode = if !agents.is_empty() {
                 match agents[0].flock_mode {
@@ -560,10 +622,148 @@ async fn main() {
                     FlockMode::Gathering => "🎯 Gathering",
                 }
             } else { "Unknown" };
-            draw_text(&format!("Flock Mode: {}", current_mode), 20.0, 210.0, 12.0, GREEN);
+            draw_text(&format!("Flock Mode: {}", current_mode), 20.0, 235.0, 11.0, GREEN);
+        }
+        
+        // コマンド履歴表示（最新3件）
+        if !command_history.is_empty() {
+            draw_text("📜 Recent Commands:", 20.0, 255.0, 12.0, YELLOW);
+            let start_idx = if command_history.len() > 3 { command_history.len() - 3 } else { 0 };
+            for (i, cmd) in command_history[start_idx..].iter().enumerate() {
+                draw_text(&format!("• {}", cmd), 25.0, 270.0 + (i as f32 * 12.0), 10.0, LIGHTGRAY);
+            }
         }
 
         next_frame().await
+    }
+}
+
+// プロンプトシステム関数群
+fn execute_prompt_command(agents: &mut Vec<AIAgent>, description: &str, command_id: usize) {
+    match command_id {
+        0 => { // 青いエージェントを中央に集める
+            for agent in agents.iter_mut() {
+                if matches!(agent.agent_type, AgentType::Builder) { // 青色のBuilder
+                    agent.current_task = AgentTask::CustomCommand(CommandType::MoveTo(Vec3::ZERO));
+                    agent.target_position = Some(Vec3::ZERO);
+                }
+            }
+        },
+        1 => { // 全エージェントでリソース大量収集
+            for (i, agent) in agents.iter_mut().enumerate() {
+                match agent.agent_type {
+                    AgentType::Collector | AgentType::Worker => {
+                        agent.current_task = AgentTask::CustomCommand(CommandType::SpeedBoost);
+                        agent.speed *= 1.5; // 速度1.5倍
+                    },
+                    _ => {
+                        agent.current_task = AgentTask::Exploring;
+                    }
+                }
+            }
+        },
+        2 => { // スカウトを高速探索モードに
+            for agent in agents.iter_mut() {
+                if matches!(agent.agent_type, AgentType::Scout) {
+                    agent.current_task = AgentTask::CustomCommand(CommandType::SpeedBoost);
+                    agent.speed *= 2.0; // 速度2倍
+                    agent.flock_mode = FlockMode::Wandering; // 自由探索
+                }
+            }
+        },
+        3 => { // 全エージェント停止・待機
+            for agent in agents.iter_mut() {
+                agent.current_task = AgentTask::CustomCommand(CommandType::Stop);
+                agent.target_position = Some(agent.position); // その場で停止
+                agent.direction = Vec3::ZERO;
+            }
+        },
+        4 => { // チーム編成：建設・収集・警備
+            for (i, agent) in agents.iter_mut().enumerate() {
+                match i {
+                    0 | 1 => { // 建設チーム
+                        agent.current_task = AgentTask::CustomCommand(CommandType::TeamUp(0));
+                        agent.flock_mode = FlockMode::Formation;
+                    },
+                    2 | 3 => { // 収集チーム
+                        agent.current_task = AgentTask::CustomCommand(CommandType::TeamUp(1));
+                        agent.flock_mode = FlockMode::Formation;
+                    },
+                    _ => { // 警備チーム
+                        agent.current_task = AgentTask::CustomCommand(CommandType::Guard(Vec3::new(0.0, 0.0, 5.0)));
+                        agent.target_position = Some(Vec3::new(0.0, 0.0, 5.0));
+                    }
+                }
+            }
+        },
+        _ => {}
+    }
+}
+
+fn update_prompt_commands(agents: &mut Vec<AIAgent>, active_commands: &mut Vec<ParsedCommand>, delta_time: f32) {
+    // アクティブコマンドの時間管理
+    active_commands.retain(|cmd| cmd.duration > 0.0);
+    for cmd in active_commands.iter_mut() {
+        cmd.duration -= delta_time;
+    }
+    
+    // エージェントのカスタムコマンド処理
+    for agent in agents.iter_mut() {
+        if let AgentTask::CustomCommand(cmd_type) = agent.current_task {
+            agent.task_timer += delta_time;
+            
+            match cmd_type {
+                CommandType::MoveTo(target) => {
+                    let distance = (target - agent.position).length();
+                    if distance < 1.0 || agent.task_timer > 10.0 {
+                        // 到着または時間切れで通常タスクに戻る
+                        agent.current_task = AgentTask::Idle;
+                        agent.task_timer = 0.0;
+                    }
+                },
+                CommandType::SpeedBoost => {
+                    if agent.task_timer > 15.0 {
+                        // 15秒後に通常速度に戻す
+                        agent.speed /= if agent.speed > 4.0 { 2.0 } else { 1.5 };
+                        agent.current_task = AgentTask::Idle;
+                        agent.task_timer = 0.0;
+                    }
+                },
+                CommandType::Stop => {
+                    if agent.task_timer > 5.0 {
+                        // 5秒後に通常動作に戻す
+                        agent.current_task = AgentTask::Idle;
+                        agent.task_timer = 0.0;
+                    }
+                },
+                CommandType::Guard(patrol_point) => {
+                    let distance = (patrol_point - agent.position).length();
+                    if distance > 2.0 {
+                        agent.target_position = Some(patrol_point);
+                    } else {
+                        // パトロールポイント周辺を円形に巡回
+                        let angle = agent.task_timer * 0.5;
+                        let patrol_pos = patrol_point + Vec3::new(angle.cos() * 2.0, 0.0, angle.sin() * 2.0);
+                        agent.target_position = Some(patrol_pos);
+                    }
+                },
+                CommandType::TeamUp(team_id) => {
+                    // チーム行動はフォーメーション移動で実現
+                    if agent.task_timer > 20.0 {
+                        agent.current_task = AgentTask::Idle;
+                        agent.task_timer = 0.0;
+                        agent.flock_mode = FlockMode::Wandering;
+                    }
+                },
+                CommandType::Follow(target_id) => {
+                    // 特定エージェント追従（今回は未実装）
+                    if agent.task_timer > 10.0 {
+                        agent.current_task = AgentTask::Idle;
+                        agent.task_timer = 0.0;
+                    }
+                },
+            }
+        }
     }
 }
 
@@ -847,16 +1047,33 @@ fn draw_building(building: &Building) {
 
 fn draw_agent_task_indicator(agent: &AIAgent) {
     let indicator_pos = agent.position + Vec3::new(0.0, 2.5, 0.0);
-    let indicator_color = match agent.current_task {
-        AgentTask::Idle => GRAY,
-        AgentTask::Exploring => GREEN,
-        AgentTask::Building(_) => ORANGE,
-        AgentTask::Collecting(_) => GOLD,
-        AgentTask::Transporting => BLUE,
-        AgentTask::Operating(_) => PURPLE,
+    let (indicator_color, indicator_shape) = match agent.current_task {
+        AgentTask::Idle => (GRAY, Vec3::new(0.2, 0.2, 0.2)),
+        AgentTask::Exploring => (GREEN, Vec3::new(0.2, 0.2, 0.2)),
+        AgentTask::Building(_) => (ORANGE, Vec3::new(0.2, 0.2, 0.2)),
+        AgentTask::Collecting(_) => (GOLD, Vec3::new(0.2, 0.2, 0.2)),
+        AgentTask::Transporting => (BLUE, Vec3::new(0.2, 0.2, 0.2)),
+        AgentTask::Operating(_) => (PURPLE, Vec3::new(0.2, 0.2, 0.2)),
+        AgentTask::CustomCommand(cmd_type) => {
+            match cmd_type {
+                CommandType::MoveTo(_) => (CYAN, Vec3::new(0.3, 0.1, 0.3)), // 十字型
+                CommandType::SpeedBoost => (YELLOW, Vec3::new(0.4, 0.4, 0.1)), // 薄い円盤
+                CommandType::Stop => (RED, Vec3::new(0.3, 0.3, 0.3)), // 大きめキューブ
+                CommandType::Guard(_) => (ORANGE, Vec3::new(0.2, 0.5, 0.2)), // 縦長
+                CommandType::TeamUp(_) => (MAGENTA, Vec3::new(0.25, 0.25, 0.25)),
+                CommandType::Follow(_) => (LIME, Vec3::new(0.2, 0.2, 0.2)),
+            }
+        }
     };
     
-    draw_cube(indicator_pos, Vec3::new(0.2, 0.2, 0.2), None, indicator_color);
+    draw_cube(indicator_pos, indicator_shape, None, indicator_color);
+    
+    // プロンプトコマンド実行中は追加エフェクト
+    if matches!(agent.current_task, AgentTask::CustomCommand(_)) {
+        let pulse = (get_time() as f32 * 3.0).sin().abs() * 0.1 + 0.9;
+        draw_cube(indicator_pos + Vec3::new(0.0, 0.4, 0.0), 
+                  Vec3::new(0.15 * pulse, 0.15 * pulse, 0.15 * pulse), None, WHITE);
+    }
     
     // 運搬中リソースの表示
     if let Some(resource_type) = agent.carried_resource {
