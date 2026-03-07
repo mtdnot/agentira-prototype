@@ -11,7 +11,23 @@ enum AgentType {
     Guardian,    // 警備型
 }
 
+#[derive(Clone, Copy)]
+enum FlockMode {
+    Wandering,    // 自由行動
+    Following,    // リーダー追従
+    Formation,    // フォーメーション維持
+    Gathering,    // 集結
+}
+
+#[derive(Clone, Copy)]
+enum FormationType {
+    VFormation,   // V字フォーメーション
+    Circle,       // 円形フォーメーション
+    Line,         // 一列フォーメーション
+}
+
 // AI Agent structure
+#[derive(Clone)]
 struct AIAgent {
     position: Vec3,
     direction: Vec3,
@@ -20,6 +36,11 @@ struct AIAgent {
     agent_type: AgentType,
     change_timer: f32,
     change_interval: f32,
+    // 群れ行動用
+    flock_mode: FlockMode,
+    is_leader: bool,
+    target_position: Option<Vec3>,
+    formation_offset: Vec3,
 }
 
 impl AIAgent {
@@ -45,20 +66,23 @@ impl AIAgent {
             agent_type,
             change_timer: 0.0,
             change_interval: rand::gen_range(1.0, 3.0),
+            // 群れ行動初期化
+            flock_mode: FlockMode::Wandering,
+            is_leader: false,
+            target_position: None,
+            formation_offset: Vec3::ZERO,
         }
     }
 
-    fn update(&mut self, delta_time: f32) {
-        // Update timer for direction changes
+    fn update(&mut self, delta_time: f32, agents: &[AIAgent]) {
+        // Update timer for behavior changes
         self.change_timer += delta_time;
         
-        // Change direction randomly
-        if self.change_timer >= self.change_interval {
-            let angle = rand::gen_range(0.0, 2.0 * PI);
-            self.direction = Vec3::new(angle.sin(), 0.0, angle.cos()).normalize();
-            self.change_timer = 0.0;
-            self.change_interval = rand::gen_range(1.0, 3.0);
-        }
+        // 群れ行動計算
+        let desired_direction = self.calculate_flock_behavior(agents);
+        
+        // スムーズに方向転換
+        self.direction = self.direction.lerp(desired_direction, 2.0 * delta_time).normalize();
         
         // Move the agent
         self.position += self.direction * self.speed * delta_time;
@@ -73,6 +97,87 @@ impl AIAgent {
             self.direction.z *= -1.0;
             self.position.z = self.position.z.clamp(-bounds, bounds);
         }
+    }
+    
+    fn calculate_flock_behavior(&mut self, agents: &[AIAgent]) -> Vec3 {
+        match self.flock_mode {
+            FlockMode::Wandering => self.calculate_wandering(),
+            FlockMode::Following => self.calculate_following(agents),
+            FlockMode::Formation => self.calculate_formation(agents),
+            FlockMode::Gathering => self.calculate_gathering(agents),
+        }
+    }
+    
+    fn calculate_wandering(&mut self) -> Vec3 {
+        // 定期的にランダムな方向に変更
+        if self.change_timer >= self.change_interval {
+            self.change_timer = 0.0;
+            self.change_interval = rand::gen_range(1.0, 3.0);
+            let angle = rand::gen_range(0.0, 2.0 * PI);
+            Vec3::new(angle.sin(), 0.0, angle.cos()).normalize()
+        } else {
+            self.direction
+        }
+    }
+    
+    fn calculate_following(&self, agents: &[AIAgent]) -> Vec3 {
+        // リーダーを探して追従
+        if let Some(leader) = agents.iter().find(|a| a.is_leader) {
+            let to_leader = (leader.position - self.position).normalize();
+            let distance = (leader.position - self.position).length();
+            
+            // 適切な距離を保つ
+            if distance > 3.0 {
+                to_leader // リーダーに近づく
+            } else if distance < 1.5 {
+                -to_leader // 少し離れる
+            } else {
+                leader.direction // リーダーと同じ方向
+            }
+        } else {
+            self.direction
+        }
+    }
+    
+    fn calculate_formation(&self, agents: &[AIAgent]) -> Vec3 {
+        // フォーメーション位置を計算
+        if let Some(target) = self.target_position {
+            let to_target = (target - self.position);
+            if to_target.length() > 0.5 {
+                to_target.normalize()
+            } else {
+                self.direction // 位置についたら現在方向を維持
+            }
+        } else {
+            self.direction
+        }
+    }
+    
+    fn calculate_gathering(&self, agents: &[AIAgent]) -> Vec3 {
+        // 中心点に向かって集結
+        let center = Vec3::ZERO;
+        let to_center = (center - self.position);
+        
+        // 他のエージェントとの距離を考慮
+        let mut separation = Vec3::ZERO;
+        let mut neighbor_count = 0;
+        
+        for other in agents {
+            if std::ptr::eq(self, other) { continue; }
+            
+            let distance = (self.position - other.position).length();
+            if distance < 2.0 && distance > 0.1 {
+                separation += (self.position - other.position).normalize() / distance;
+                neighbor_count += 1;
+            }
+        }
+        
+        if neighbor_count > 0 {
+            separation = separation / neighbor_count as f32;
+        }
+        
+        // 中心への移動と他エージェントからの分離をバランス
+        (to_center.normalize() * 0.7 + separation * 0.3).normalize()
     }
 
     fn draw(&self) {
@@ -192,11 +297,49 @@ async fn main() {
         AIAgent::new(4.0, 2.0, MAGENTA, AgentType::Guardian),
     ];
 
+    // Scoutをリーダーに設定
+    agents[1].is_leader = true;
+    agents[1].flock_mode = FlockMode::Wandering;
+    
+    // 他のエージェントをFollowingモードに
+    for i in 0..agents.len() {
+        if i != 1 { // Scout以外
+            agents[i].flock_mode = FlockMode::Following;
+        }
+    }
+
     let mut camera_angle = 0.0;
     let camera_radius = 15.0;
+    let mut flock_mode_timer = 0.0;
 
     loop {
         let delta_time = get_frame_time();
+        flock_mode_timer += delta_time;
+        
+        // キーボード入力で群れ行動モード切り替え
+        if is_key_pressed(KeyCode::Key1) {
+            set_all_agents_mode(&mut agents, FlockMode::Wandering);
+        } else if is_key_pressed(KeyCode::Key2) {
+            set_follow_mode(&mut agents);
+        } else if is_key_pressed(KeyCode::Key3) {
+            set_formation_mode(&mut agents, FormationType::VFormation);
+        } else if is_key_pressed(KeyCode::Key4) {
+            set_formation_mode(&mut agents, FormationType::Circle);
+        } else if is_key_pressed(KeyCode::Key5) {
+            set_all_agents_mode(&mut agents, FlockMode::Gathering);
+        }
+        
+        // 自動モード切り替え (15秒ごと)
+        if flock_mode_timer > 15.0 {
+            flock_mode_timer = 0.0;
+            let mode_index = (get_time() as i32) % 4;
+            match mode_index {
+                0 => set_follow_mode(&mut agents),
+                1 => set_formation_mode(&mut agents, FormationType::VFormation),
+                2 => set_formation_mode(&mut agents, FormationType::Circle),
+                _ => set_all_agents_mode(&mut agents, FlockMode::Gathering),
+            }
+        }
         
         // Update camera rotation
         camera_angle += 0.3 * delta_time;
@@ -207,9 +350,11 @@ async fn main() {
         );
         camera.target = Vec3::ZERO;
 
-        // Update AI agents
-        for agent in &mut agents {
-            agent.update(delta_time);
+        // Update AI agents (群れ行動対応)
+        // 借用問題を避けるため、2段階でupdate
+        let agents_snapshot: Vec<AIAgent> = agents.clone();
+        for i in 0..agents.len() {
+            agents[i].update(delta_time, &agents_snapshot);
         }
 
         // Draw
@@ -244,11 +389,114 @@ async fn main() {
         set_default_camera();
 
         // Draw UI
-        draw_text("Agentira Prototype - 3D Pixel AI Agents", 20.0, 30.0, 20.0, DARKGRAY);
+        draw_text("Agentira Prototype - Flocking AI Agents 🤖", 20.0, 30.0, 20.0, DARKGRAY);
         draw_text(&format!("FPS: {:.0}", get_fps()), 20.0, 50.0, 16.0, DARKGRAY);
-        draw_text("5 Agent Types: Worker(Red) Scout(Green) Builder(Blue) Collector(Yellow) Guardian(Magenta)", 20.0, 70.0, 14.0, DARKGRAY);
-        draw_text("Each agent has unique design, speed, and equipment", 20.0, 90.0, 14.0, DARKGRAY);
+        
+        // 群れ行動制御UI
+        draw_text("🎮 Flock Controls:", 20.0, 80.0, 18.0, BLUE);
+        draw_text("[1] Wandering  [2] Follow Leader  [3] V-Formation  [4] Circle  [5] Gather", 20.0, 100.0, 14.0, DARKGRAY);
+        draw_text("Auto mode changes every 15 seconds", 20.0, 120.0, 12.0, GRAY);
+        
+        // エージェント状態表示
+        let current_mode = if !agents.is_empty() {
+            match agents[0].flock_mode {
+                FlockMode::Wandering => "🚶 Wandering",
+                FlockMode::Following => "👥 Following Leader",
+                FlockMode::Formation => "📐 Formation",
+                FlockMode::Gathering => "🎯 Gathering",
+            }
+        } else {
+            "Unknown"
+        };
+        draw_text(&format!("Current Mode: {}", current_mode), 20.0, 140.0, 16.0, GREEN);
+        draw_text(&format!("Mode Timer: {:.1}s", flock_mode_timer), 20.0, 160.0, 14.0, GRAY);
 
         next_frame().await
     }
+}
+
+// 群れ行動制御関数群
+fn set_all_agents_mode(agents: &mut [AIAgent], mode: FlockMode) {
+    for agent in agents.iter_mut() {
+        agent.flock_mode = mode;
+        agent.is_leader = false;
+        agent.target_position = None;
+    }
+    
+    if matches!(mode, FlockMode::Wandering) {
+        // Wanderingモードでは全員がリーダー（自由行動）
+        for agent in agents.iter_mut() {
+            agent.change_timer = agent.change_interval; // 即座に方向転換
+        }
+    }
+}
+
+fn set_follow_mode(agents: &mut [AIAgent]) {
+    for (i, agent) in agents.iter_mut().enumerate() {
+        agent.flock_mode = FlockMode::Following;
+        agent.is_leader = i == 1; // Scout(index 1)をリーダーに
+        agent.target_position = None;
+    }
+}
+
+fn set_formation_mode(agents: &mut [AIAgent], formation: FormationType) {
+    for agent in agents.iter_mut() {
+        agent.flock_mode = FlockMode::Formation;
+        agent.is_leader = false;
+    }
+    
+    // フォーメーション位置を計算
+    let center = Vec3::ZERO;
+    let formation_positions = calculate_formation_positions(formation, agents.len());
+    
+    for (i, agent) in agents.iter_mut().enumerate() {
+        if i < formation_positions.len() {
+            agent.target_position = Some(center + formation_positions[i]);
+            agent.formation_offset = formation_positions[i];
+        }
+    }
+}
+
+fn calculate_formation_positions(formation: FormationType, agent_count: usize) -> Vec<Vec3> {
+    let mut positions = Vec::new();
+    
+    match formation {
+        FormationType::VFormation => {
+            // V字フォーメーション
+            positions.push(Vec3::new(0.0, 0.0, 2.0)); // リーダー
+            for i in 1..agent_count {
+                let side = if i % 2 == 1 { 1.0 } else { -1.0 };
+                let row = (i + 1) / 2;
+                positions.push(Vec3::new(
+                    side * (row as f32) * 1.5,
+                    0.0,
+                    2.0 - (row as f32) * 1.0
+                ));
+            }
+        },
+        FormationType::Circle => {
+            // 円形フォーメーション
+            let radius = 3.0;
+            for i in 0..agent_count {
+                let angle = (i as f32) * 2.0 * PI / (agent_count as f32);
+                positions.push(Vec3::new(
+                    angle.cos() * radius,
+                    0.0,
+                    angle.sin() * radius
+                ));
+            }
+        },
+        FormationType::Line => {
+            // 一列フォーメーション
+            for i in 0..agent_count {
+                positions.push(Vec3::new(
+                    (i as f32 - (agent_count as f32 - 1.0) / 2.0) * 2.0,
+                    0.0,
+                    0.0
+                ));
+            }
+        }
+    }
+    
+    positions
 }
